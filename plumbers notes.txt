@@ -1,0 +1,191 @@
+Dependency Ordering in the Linux Kernel - Will Deacon
+===
+
+Linux relies on dependency ordering for performance for things like RCU
+
+C11 memory model is somewhat flawed and the kernel doesn't use them
+
+READ_ONCE/WRITE_ONCE used for atomic volatile access.
+
+control/data/address dependencies
+
+control: do a read, then do a conditional based on the read. some architectures can reorder these
+
+data: read then write, every architecture handles this fine
+
+address: read then read (double pointer), every architecture but Alpha handles this fine. rcu_dereference() uses this, evaluates to a fence on Alpha and nothing on any other architecture
+
+Converting a read to read address dependency into a control dependency breaks hardware ordering.
+
+The compiler can transform an address dependency to a control dependency
+
+This is not just theoretical - there's an example in the timekeeping code
+
+Discussions:
+(Paul): an implementation in the context of the standards committee would be helpful.
+
+(Nick): would post verification be interesting? (Will): hopefully not 10k warnings.
+
+(Marco): warning from builds; not necessarily implementing memory_order_consume. Warning would check before all volatile before transforms than after.
+
+(Paul): GSoC Project to weaken volatile
+
+(Peter): it would be nice to annotate control dependency, for both compilers.  Acquire release implemented with fences, which we want to avoid.
+
+(Paul): what would such annotation look like? Label the load and subsequent store?
+
+(Peter): unsure, do compiler folks have ideas?  Exiting a loop is a common control dependency. Keep a branch, don't eliminate a branch.
+
+(Paul): if we tagged a closing `}`, would that be helpful?
+
+(Will): loop with multiple exit points where only one is important.
+
+(Paul): so maybe break/continue statements? return out of a loop?
+
+(Nick): __no_inline or maybe fn attribute for no attributor
+
+(Peter): Linux tooling mailing list proposed at binutils BoF. Would be useful to hash out details.  GNU+LLVM folks.
+
+(Steven): reuse volatile for some control flow?
+
+(Paul): declare tkr to be volatile in example, but maybe not sufficient.
+
+(Peter): volatile if, volatile for, volatile while
+
+(Marco): volatile block
+
+Barriers to in Tree Rust - Geoffrey Thomas
+===
+(Alex): core and alloc crates would be necessary
+(Josh): std lib has 3 parts, core, alloc, std; std would not be used in the kernel
+(Geoffrey): bindings would be used for ownership notations for bindings
+(Nick): how does bingen add lifetime info?
+(Alex): bingen gives you unsafe bindings, wrap those in lifetime annotated functions
+(Josh): want to avoid maintence burden on bindings
+(Geoffrey): lots of questions around arch specific backends
+
+Large discussion about architecture support. Rust runs anywhere LLVM does, and we wouldn't be immediately introducing it into the core kernel, so it should be fine initially. People are adding more architecture support. And there's been discussion about GCC backends. But none of that should be a blocker to getting it into the kernel.
+
+Pekka Enberg
+7:58 AM
+What ABI issues are there with C/GCC and Rust/LLVM? I at least have managed to mix them in my toy kernel.
+Geoffrey Thomas
+7:58 AM
+Pekka: mostly worry :)
+I agree it _should_ work
+but people worry about ABI issues with GCC x and GCC x+1
+
+Discussion with gregkh: no reason to block building the kernel C with GCC and Rust with LLVM, as long as it works and you're building it all together.
+
+LTO
+===
+Will Deacon
+8:08 AM
+It would be very much appreciated if the integrated assembler took the same cmdline options as gas, and not differ pointlessly.
+(Sedat): why my debug info is much larger?
+(Brendan): autofdo docs leave much to be desired
+(Mark): maybe ci systems could provide training/profiling data?
+Ilie Halip
+(offline)
+8:32 AM
+Does -fsave-optimization-record work with LTO?
+Mark Brown
+8:29 AM
+Or perhaps a git repo isn't even the right structure for sharing [profile data binaries].
+@Will, good point. Normally the LLVM team tries to change flags only when necessary. For instance, the linker is careful about that.
+
+
+Measuring Kernel Compile Times w/ Clang
+===
+Jason Gunthorpe
+9:05 AM
+has anyone ever looked at PCH for Linux?
+Arnd Bergmann
+9:11 AM
+@Jason I tried PCH a few times in the past, always ended up with slower builds than without it
+Nathan Huckleberry
+Arnd: I have series that massively cuts down on build times for both compilers by reducing header dependencies.
+Rasmus Villemoes
+9:07 AM
+plug: https://wildmoose.dk/header-bloat/
+Marco Elver
+9:09 AM
+Re headers, there used to be https://include-what-you-use.org/ -- anyone played with it on the kernel?
+9:09 AM
+iirc it doesn't play nice with ifdefs
+Ilie Halip
+9:11 AM
+i played with include-what-you-use, it has the tendency of removing a lot of includes then adding a lot of includes; only ran it on a few files and didn't follow up
+Arnd Bergmann
+9:37 AM
+following up on my kernel headers cleanup earlier, here is a graph of which headers include which others most often https://drive.google.com/file/d/1GFCmN3r93EJImvo-cbYJLd-iY1vJ_G5i/view?usp=sharing
+
+clang-format clang-tidy
+===
+No new ideas for clang-tidy checks
+mixed polling on using clang-format subsytem wide
+Will Deacon
+9:31 AM
+Many maintainers no longer run checkpatch.pl because it tends to spit out so many useless messages and/or false positives. A lot of this is because it's just using regexs, so perhaps a useful form of checkpatch using clang-tidy as a backend might actually get run by people?
+Masahiro Yamada
+9:28 AM
+Is it possible to have checks in the kernel tree instead of the llvm tree?
+Stephen Hines
+9:31 AM
+@Masahiro Not really. https://bugs.llvm.org//show_bug.cgi?id=32739 is the request to allow for external plugins.
+
+asm goto w/ outputs
+===
+(Nick): discuss on new kernel tooling mailing list?
+Segher Boessenkool
+9:45 AM
+GCC can have outputs on jump instructions just fine. the restriction is that there cannot be output reloads. this means in particular that all outputs have to allow memory
+Boqun Feng
+9:48 AM
+Thanks Bill! Is there any doc about the semantics of asm got w/ ouputs? Like the gcc one:https://gcc.gnu.org/onlinedocs/gcc/Extended-Asm.html
+Bill Wendling
+9:50 AM
+@Boqun: There's a general description in the llvm docs (this feature will be in clang 11). I'll make sure that it's detailed about the semantics. :)
+
+
+Kernel configurations
+===
+Arnd Bergmann
+10:05 AM
+I'd argue that each build failure is a bug, though some are in the build system not detecting the environment correctly.
+some are compiler bugs rather than kernel bugs
+Arnd:
+1.6% of randconfigs builds fail with clang. Not much more than gcc
+Nick Desaulniers
+10:16 AM
+they say "fix your compiler" to me
+idk why
+Sedat Dilek
+10:16 AM
+@Nick. not true: they said fix your damn compiler
+Mathieu Acher
+10:18 AM
+for ligther tested architectures, we can also expect much more issues with gcc
+
+tuxbuild/tuxmake
+===
+Arnd Bergmann
+10:25 AM
+Q: How much of the 15 minute build is actual compile/link time?
+(Kees): any boot support/microservice?
+Sedat Dilek
+10:25 AM
+do you post your TuxBuild reports for example to linux-stable mailing-list for stable releases? (Not yet)
+Khem Raj
+10:26 AM
+do you support distributed compiling ?
+(no; want to build like end developers do)
+
+ci
+===
+Masahiro Yamada
+10:51 AM
+When we set LLVM_IAS=1, can we omit CROSS_COMPILE ?
+(Guillame): LLVM=1 works for merge_config.sh, but can't unset LD. Can we revive old patch for setting CC=env var?
+(Geoffrey): check out rust crater
+
